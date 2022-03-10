@@ -232,7 +232,9 @@ void runParametrization(void) {
     {
       pwm.pinDuty( 6, pwm_duty );
       startADC();
-      while(!adc_ready);
+      while(!adc_ready) {
+        yield();
+      }
 
       // Copy and rescale data from ADC buffer to FFT buffer
       for (uint16_t i = 0; i < samples; i++)
@@ -326,13 +328,15 @@ void setup() {
   
 }
 
-void loop() {
+void yield() {
 
-  
-
-
-  MIDI.read();
+MIDI.read();
   //stepper.runSpeed();
 
+}
+
+void loop() {
+
+yield();
 
 }
