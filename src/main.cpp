@@ -26,7 +26,7 @@ static const unsigned sMaxNumNotes = 16;
 MidiNoteList<sMaxNumNotes> midiNotes;
 
 const uint16_t samples = 2048; //This value MUST ALWAYS be a power of 2
-const double samplingFrequency = 21000;
+const float32_t samplingFrequency = 21000;
 
 arm_cfft_radix4_instance_f32 C;
 arm_rfft_instance_f32 S;
@@ -199,6 +199,27 @@ void handleStop()
   handleNoteUpdate();
 }
 
+float32_t interpolatePeak() {
+	float32_t maxY = 0;
+	uint16_t IndexOfMaxY = 0;
+	//If sampling_frequency = 2 * max_frequency in signal,
+	//value would be stored at position samples/2
+	for (uint16_t i = 1; i < ((samples >> 1) + 1); i++) {
+		if ((fftbufReal[i-1] < fftbufReal[i]) && (fftbufReal[i] > fftbufReal[i+1])) {
+			if (fftbufReal[i] > maxY) {
+				maxY = fftbufReal[i];
+				IndexOfMaxY = i;
+			}
+		}
+	}
+	float32_t delta = 0.5 * ((fftbufReal[IndexOfMaxY-1] - fftbufReal[IndexOfMaxY+1]) / (fftbufReal[IndexOfMaxY-1] - (2.0 * fftbufReal[IndexOfMaxY]) + fftbufReal[IndexOfMaxY+1]));
+	float32_t interpolatedX = ((IndexOfMaxY + delta)  * samplingFrequency) / (samples-1);
+	if(IndexOfMaxY==(samples >> 1)) //To improve calculation on edge values
+		interpolatedX = ((IndexOfMaxY + delta)  * samplingFrequency) / (samples);
+	// returned value: interpolated frequency peak apex
+	return(interpolatedX);
+}
+
 void runParametrization(void) {
 
   float32_t fftResultAmplitude;
@@ -227,13 +248,15 @@ void runParametrization(void) {
       // Zero DC Component
       fftbufReal[0] = 0; 
       // Find Peak and calculate Frequency
+      // TODO: This is doppelt gemoppelt
       arm_max_f32(fftbufReal,samples/4,&fftResultAmplitude,&fftResultBin);
-      fftResultFreq = ((float32_t)samplingFrequency / (float32_t)samples) * fftResultBin;
+      //fftResultFreq = ((float32_t)samplingFrequency / (float32_t)samples) * fftResultBin;
+      fftResultFreq = interpolatePeak();
 
       //FFT.Windowing(vReal, samples, FFT_WIN_TYP_HAMMING, FFT_FORWARD);  /* Weigh data */
       //FFT.Compute(vReal, vImag, samples, FFT_FORWARD); /* Compute FFT */
       //FFT.ComplexToMagnitude(vReal, vImag, samples); /* Compute magnitudes */
-      //double x = FFT.MajorPeak(vReal, samples, samplingFrequency);
+      //float32_t x = FFT.MajorPeak(vReal, samples, samplingFrequency);
 
         // FFT Detection Threshold
       if (fftResultAmplitude > 1000.0) {
