@@ -34,22 +34,16 @@ arm_rfft_instance_f32 S;
 float32_t fftbufReal[samples];
 float32_t fftbufComplex[samples*2];
 
-volatile int bufn,obufn;
-uint16_t buf[4][samples];   // 4 buffers of x readings
+volatile bool adc_ready = false;
+uint16_t adc_buf[samples];
 
 volatile int pwm_duty = 0;
-volatile int goalFreq = 0;
 
 const uint16_t pwmCount = 256;
 const uint16_t pitchCount = sizeof(midiNotePitches) / sizeof(uint16_t);
 
 float32_t pwm_to_freq_values[pwmCount];
 uint16_t freq_to_pwm_values[pitchCount] = {0};
-
-
-bool nCalibrated = true;
-
-//arm_linear_interp_instance_f32 S = {256, 0, 1, &pwm_to_freq_values[0]};
 
 
 void generateLookupFreqToPWMTable() {
@@ -117,12 +111,14 @@ void setupTimer(void) {
 
 }
 
-void ADC_Handler(){     // move DMA pointers to next buffer
-  int f=ADC->ADC_ISR;
-  if (f&(1<<27)){ // DMA End of RX Buffer Interrupt
-   bufn=(bufn+1)&3;
-   ADC->ADC_RNPR=(uint32_t)buf[bufn];
-   ADC->ADC_RNCR=samples;
+void ADC_Handler(){     
+
+  if (ADC->ADC_ISR & ADC_ISR_ENDRX) {                                 // DMA End of RX Buffer Interrupt
+    ADC->ADC_MR = (ADC->ADC_MR & 0xFFFFFFF0);                         // No Trigger
+    ADC->ADC_PTCR = ADC_PTCR_RXTDIS;                                  // Disable RX DMA Transfer
+    ADC->ADC_RPR = (uint32_t)adc_buf;                                 // Load DMA buffer pointer
+    ADC->ADC_RCR = samples;                                           // Load DMA transfer size
+    adc_ready = true;
   } 
 }
 
@@ -131,32 +127,29 @@ void setupADC(void) {
   pmc_enable_periph_clk(ID_ADC);
   adc_init(ADC, SystemCoreClock, ADC_FREQ_MAX, ADC_STARTUP_FAST);
 
-  //ADC->ADC_MR |=0x80; // Free running (only for Debug)
-  ADC->ADC_MR = (ADC->ADC_MR & 0xFFFFFFF0)| (1 << 1) | ADC_MR_TRGEN;   // Trig source TIO from TC0
+  ADC->ADC_PTCR = ADC_PTCR_RXTDIS;                                    // Disable RX DMA Transfer
+  ADC->ADC_IDR = 0xFFFFFFFF;                                          // Disable interrupts
+  ADC->ADC_IER = ADC_IER_ENDRX;                                       // Enable End of RX Buffer Interrupt
+  ADC->ADC_CHDR = 0xFFFF;                                             // Disable all channels
+  ADC->ADC_CHER = ADC_CHER_CH7;                                       // Enable just A0 (AD7)
+  ADC->ADC_CGR = 0x15555555;                                          // No Gain
+  ADC->ADC_COR = 0x00000000;                                          // No Offsets
 
-  NVIC_EnableIRQ(ADC_IRQn);
+  ADC->ADC_RPR = (uint32_t)adc_buf;                                   // Load DMA buffer pointer
+  ADC->ADC_RCR = samples;                                             // Load DMA transfer size
+
+  //ADC->ADC_MR |=0x80;                                               // Free running (only for Debug)
+  ADC->ADC_MR = (ADC->ADC_MR & 0xFFFFFFF0);                           // No Trigger
+
   NVIC_SetPriority(ADC_IRQn,6); 
+  NVIC_EnableIRQ(ADC_IRQn);
+}
 
-  ADC->ADC_IDR = 0xFFFFFFFF ;   // Disable interrupts
-  ADC->ADC_IER = (1<<27) ;         // Enable End of RX Buffer Interrupt
-  ADC->ADC_CHDR = 0xFFFF ;      // Disable all channels
-  ADC->ADC_CHER = 0x80 ;        // Enable just A0 (AD7)
-  ADC->ADC_CGR = 0x15555555 ;   // No Gain
-  ADC->ADC_COR = 0x00000000 ;   // No Offsets
+void startADC(void){
 
-  
-  
- 
-  ADC->ADC_RPR=(uint32_t)buf[0];   // Current DMA buffer pointer
-  ADC->ADC_RCR=samples; // Current DMA transfer size
-  ADC->ADC_RNPR=(uint32_t)buf[1]; // Next DMA DMA buffer pointer
-  ADC->ADC_RNCR=samples; // Next DMA transfer size
-  bufn=obufn=1;
-  ADC->ADC_PTCR=1; // Enable RX DMA Transfer
-  ADC->ADC_CR=2; // Start ADC
-
- 
-  
+  adc_ready = false;
+  ADC->ADC_PTCR = ADC_PTCR_RXTEN;                                     // Enable RX DMA Transfer
+  ADC->ADC_MR = (ADC->ADC_MR & 0xFFFFFFF0)| ADC_MR_TRGSEL_ADC_TRIG1 | ADC_MR_TRGEN;  // Trig source TIO from TC0
 }
 
 void handleNoteUpdate(void)
@@ -170,7 +163,7 @@ if (midiNotes.empty())
         byte currentNote = 0;
         midiNotes.getLast(currentNote);
         //stepper.setSpeed((float)midiNotePitches[currentNote]*4.0);
-        goalFreq = midiNotePitches[currentNote];
+        //goalFreq = midiNotePitches[currentNote];
     }
 }
 
@@ -206,13 +199,84 @@ void handleStop()
   handleNoteUpdate();
 }
 
+void runParametrization(void) {
+
+  float32_t fftResultAmplitude;
+  float32_t fftResultFreq;
+  uint32_t fftResultBin;
+  
+  Serial.println("[DC Motor] Starting Sweep.");
+
+  for (uint16_t pwm_duty = 0; pwm_duty < pwmCount; pwm_duty++)
+    {
+      pwm.pinDuty( 6, pwm_duty );
+      startADC();
+      while(!adc_ready);
+
+      // Copy and rescale data from ADC buffer to FFT buffer
+      for (uint16_t i = 0; i < samples; i++)
+        {
+          fftbufReal[i] = adc_buf[i];
+        }
+      arm_scale_f32(fftbufReal,0.001,fftbufReal,samples);
+
+      // Perform FFT
+      arm_rfft_f32(&S,fftbufReal,fftbufComplex);
+      // Compute Magnitude. Spectum is Symmetric, so only half length necessary
+      arm_cmplx_mag_squared_f32(fftbufComplex,fftbufReal,samples/2);
+      // Zero DC Component
+      fftbufReal[0] = 0; 
+      // Find Peak and calculate Frequency
+      arm_max_f32(fftbufReal,samples/4,&fftResultAmplitude,&fftResultBin);
+      fftResultFreq = ((float32_t)samplingFrequency / (float32_t)samples) * fftResultBin;
+
+      //FFT.Windowing(vReal, samples, FFT_WIN_TYP_HAMMING, FFT_FORWARD);  /* Weigh data */
+      //FFT.Compute(vReal, vImag, samples, FFT_FORWARD); /* Compute FFT */
+      //FFT.ComplexToMagnitude(vReal, vImag, samples); /* Compute magnitudes */
+      //double x = FFT.MajorPeak(vReal, samples, samplingFrequency);
+
+        // FFT Detection Threshold
+      if (fftResultAmplitude > 1000.0) {
+
+        pwm_to_freq_values[pwm_duty] = fftResultFreq;
+
+        Serial.write(27);
+        Serial.print("[2J"); // clear screen
+        Serial.write(27);
+        Serial.print("[H"); // cursor to home
+        Serial.print("[DC Motor] Measuring at PWM ");
+        Serial.print(pwm_duty);
+        Serial.print("\t Frequency: ");
+        Serial.print(fftResultFreq, 1);
+        Serial.print("\t Amplitude: ");
+        Serial.println(fftResultAmplitude, 1);
+
+      }
+      else {
+
+        // No Valid Signal Detected
+        pwm_to_freq_values[pwm_duty] = 0;
+
+        Serial.write(27);
+        Serial.print("[2J"); // clear screen
+        Serial.write(27);
+        Serial.print("[H"); // cursor to home
+        Serial.print("[DC Motor] Measuring at PWM ");
+        Serial.print(pwm_duty);
+        Serial.println("\t No Audio Activity Detected ");
+        
+      }
+    }
+}
+
 void setup() {
 
   Serial.begin(115200);
   while (!Serial);
+  Serial.println("Mementos init...");
 
-  setupADC();
   setupTimer();
+  setupADC();
 
   MIDI.begin();
   MIDI.setHandleNoteOn(handleNoteOn);
@@ -228,116 +292,21 @@ void setup() {
   pwm.pinFreq1( 6 );
   pwm.pinDuty( 6, pwm_duty );
 
+  arm_rfft_init_f32(&S,&C,samples,false,true);
 
   Serial.println("Mementos ready.");
 
-  setupADC();
-  setupTimer();
-
-  arm_rfft_init_f32(&S,&C,samples,false,true);
+  runParametrization();
+  
+  
 
   
 }
 
 void loop() {
 
-  float32_t fftResultAmplitude;
-  uint32_t fftResultBin;
-  float32_t fftResultFreq;
-
-  // Buffer is Ready
-  if (obufn!=bufn && nCalibrated) {
-
-    // Copy and rescale data from ADC buffer to FFT buffer
-    for (uint16_t i = 0; i < samples; i++)
-      {
-        fftbufReal[i] = buf[obufn][i];
-      }
-    arm_scale_f32(fftbufReal,0.001,fftbufReal,samples);
-
-    // Perform FFT
-    arm_rfft_f32(&S,fftbufReal,fftbufComplex);
-    // Compute Magnitude. Spectum is Symmetric, so only half length necessary
-    arm_cmplx_mag_squared_f32(fftbufComplex,fftbufReal,samples/2);
-    // Zero DC Component
-    fftbufReal[0] = 0; 
-    // Find Peak and calculate Frequency
-    arm_max_f32(fftbufReal,samples/4,&fftResultAmplitude,&fftResultBin);
-    fftResultFreq = ((float32_t)samplingFrequency / (float32_t)samples) * fftResultBin;
-
-    // Rotate Buffer
-    obufn=(obufn+1)&3;
-
-    //FFT.Windowing(vReal, samples, FFT_WIN_TYP_HAMMING, FFT_FORWARD);  /* Weigh data */
-    //FFT.Compute(vReal, vImag, samples, FFT_FORWARD); /* Compute FFT */
-    //FFT.ComplexToMagnitude(vReal, vImag, samples); /* Compute magnitudes */
-    //double x = FFT.MajorPeak(vReal, samples, samplingFrequency);
-    
-    // FFT Detection Threshold
-    if (fftResultAmplitude > 1000.0) {
-
-      pwm_to_freq_values[pwm_duty] = fftResultFreq;
-      pwm_duty++;
-      pwm.pinDuty( 6, pwm_duty );
-
-      // if (fftResultFreq > goalFreq + 2) {
-      //   pwm_duty--;
-      //   if (pwm_duty < 0) pwm_duty = 0;
-      // }
-      // if (fftResultFreq < goalFreq - 2) {
-      //   pwm_duty++;
-      //   if (pwm_duty > 255) pwm_duty = 255;
-      // }
-
-
-      Serial.write(27);
-      Serial.print("[2J"); // clear screen
-      Serial.write(27);
-      Serial.print("[H"); // cursor to home
-      Serial.print("[Motor] Control Loop Target Frequency ");
-      Serial.print(goalFreq);
-      Serial.print("\t Actual Frequency: ");
-      Serial.print(fftResultFreq, 1);
-      Serial.print("\t Amplitude: ");
-      Serial.print(fftResultAmplitude, 1);
-      Serial.print("\t PWM: ");
-      Serial.println(pwm_duty);
-
-    }
-    else {
-
-      // No Valid Signal Detected
-      pwm_to_freq_values[pwm_duty] = 0;
-      pwm_duty++;
-      pwm.pinDuty( 6, pwm_duty );
-
-
-      Serial.write(27);
-      Serial.print("[2J"); // clear screen
-      Serial.write(27);
-      Serial.print("[H"); // cursor to home
-      Serial.println("[Motor] No Audio Activity Detected ");
-      Serial.print("\t PWM: ");
-      Serial.println(pwm_duty);
-    }
-    if (pwm_duty > 254) {
-      nCalibrated = false;
-      pwm_duty = 0;
-      pwm.pinDuty( 6, pwm_duty );
-      generateLookupFreqToPWMTable();
-      for (uint16_t i = 0; i < 256; i++)
-      {
-        Serial.println(pwm_to_freq_values[i]);
-      }
-
-      for (uint16_t i = 0; i < pitchCount; i++)
-      {
-        Serial.println(freq_to_pwm_values[i]);
-      }
-
-    }
   
-  }
+
 
   MIDI.read();
   //stepper.runSpeed();
