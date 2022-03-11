@@ -46,6 +46,80 @@ float32_t pwm_to_freq_values[pwmCount];
 uint16_t freq_to_pwm_values[pitchCount] = {0};
 
 
+int binary_search(float what){
+  int_fast32_t a=0;
+  int_fast32_t b=pwmCount-1;
+  
+  while( b-a > 1 ){
+    Serial.print("Binary Search Iteration A: ");
+    Serial.print(a);
+    Serial.print("\t B: ");
+    Serial.println(b);
+
+
+    int_fast32_t c = (a+b)/2;
+    float f = pwm_to_freq_values[c];
+    if(what<f){
+      b = c;
+    }
+    else{
+      a = c;
+    }
+  }
+  float fc = pwm_to_freq_values[(a+b)/2];
+  //if (pwm_to_freq_values[a] < )
+  return (a+b)/2;
+}
+
+uint16_t binary_search_pwm(float what){
+  int a,b;
+  a = b = binary_search(what);
+
+  float f = pwm_to_freq_values[a];
+
+  if (abs(what-f) < __FLT_EPSILON__){
+    return (float)a/pwmCount * 255.0;
+  }
+  else if(what < f)
+  {
+    a-=1;
+  }
+  else{
+    b+=1;
+  }
+
+  if(b>=pwmCount){ 
+    return pwmCount-1;
+  }
+  while(a<0){
+    return 0;
+  }
+  
+  float fa,fb,fc;
+  fa = pwm_to_freq_values[a];
+  fb = pwm_to_freq_values[b];
+  fc = what;
+  
+  float pa,pb;
+  pa = a;
+  pb = b;
+
+  Serial.print("Linear Interpolation: fa");
+  Serial.print(fa);
+  Serial.print("\t fb: ");
+  Serial.print(fb);
+  Serial.print("\t fc: ");
+  Serial.print(fc);
+  Serial.print("\t pa: ");
+  Serial.print(pa);
+  Serial.print("\t pb: ");
+  Serial.println(pb);
+
+  float result = (fc-fa)*(pb-pa)/(fb-fa) + pa;
+
+  return (float)result/pwmCount * 255.0;
+}
+
 void generateLookupFreqToPWMTable() {
   for (int i = 0; i < pitchCount; i++) {
     uint8_t iteration = 1;
@@ -156,14 +230,20 @@ void handleNoteUpdate(void)
 {
 if (midiNotes.empty())
     {
-        //stepper.setSpeed(0);
+        pwm.pinDuty( 6, 0 );
     }
     else
     {
         byte currentNote = 0;
         midiNotes.getLast(currentNote);
+        uint16_t duty = binary_search_pwm((float)midiNotePitches[currentNote]);
         //stepper.setSpeed((float)midiNotePitches[currentNote]*4.0);
         //goalFreq = midiNotePitches[currentNote];
+        Serial.print("[MIDI] Setting PWM Value:");
+        Serial.print("\t");
+        Serial.println(duty);
+        if (duty > 255) duty = 255;
+        pwm.pinDuty( 6, duty);
     }
 }
 
@@ -225,8 +305,10 @@ void runParametrization(void) {
   float32_t fftResultAmplitude;
   float32_t fftResultFreq;
   uint32_t fftResultBin;
+  float32_t fftThreshold = 100000.0;
   
   Serial.println("[DC Motor] Starting Sweep.");
+  delay(1000);
 
   for (uint16_t pwm_duty = 0; pwm_duty < pwmCount; pwm_duty++)
     {
@@ -261,8 +343,9 @@ void runParametrization(void) {
       //float32_t x = FFT.MajorPeak(vReal, samples, samplingFrequency);
 
         // FFT Detection Threshold
-      if (fftResultAmplitude > 1000.0) {
+      if (fftResultAmplitude > fftThreshold) {
 
+        fftThreshold = 0.8 * fftThreshold;
         pwm_to_freq_values[pwm_duty] = fftResultFreq;
 
         Serial.write(27);
@@ -292,6 +375,8 @@ void runParametrization(void) {
         
       }
     }
+  pwm.pinDuty( 6, 0 );
+  Serial.println("[DC Motor] Sweep Finished.");
 }
 
 void setup() {
