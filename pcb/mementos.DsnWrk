@@ -1,0 +1,6 @@
+[ProjectGroup]
+Version=1.0
+[Project1]
+ProjectPath=mementos\mementos.PrjPcb
+[Project2]
+ProjectPath=mementos_lib\mementos_lib.LibPkg
